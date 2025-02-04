@@ -9,6 +9,8 @@ import requests
 import polyline
 import random
 from itertools import combinations
+import osmnx as ox
+import networkx as nx
 
 class AdvancedVRPSolver:
     def __init__(self, data, num_vehicles, vehicle_capacity, max_route_time):
@@ -197,63 +199,95 @@ class AdvancedVRPSolver:
 
 
 
+    def get_route_osmnx(self, start, end):
+        """OSMNX ve NetworkX ile iki nokta arasındaki en kısa yolu bulur."""
+    
+        try:
+            # Yol ağını daha geniş bir alandan al (15 km çapında)
+            G = ox.graph_from_point((start[0], start[1]), dist=30000, network_type="drive")
+
+            # En yakın düğümleri bul (lon, lat sırası önemli)
+            orig_node = ox.distance.nearest_nodes(G, start[1], start[0])
+            dest_node = ox.distance.nearest_nodes(G, end[1], end[0])
+
+            # En kısa yolu bul (Dijkstra Algoritması)
+            try:
+                shortest_route = nx.shortest_path(G, orig_node, dest_node, weight="length")
+            except nx.NetworkXNoPath:
+                st.warning("Dijkstra ile yol bulunamadı, A* algoritması deneniyor...")
+                shortest_route = nx.astar_path(G, orig_node, dest_node, weight="length")
+
+            # Rota koordinatlarını çıkar
+            route_coords = [(G.nodes[node]["y"], G.nodes[node]["x"]) for node in shortest_route]
+
+            # Yol ağının düzgün yüklendiğinden emin ol
+            st.write(f"Yol Ağı Düğümleri: {len(G.nodes)}")
+            st.write(f"Yol Ağı Kenarları: {len(G.edges)}")
+
+            # Eğer rota bulunamazsa hata ver
+            if not route_coords:
+                st.error(f"Başlangıç: {start}, Bitiş: {end} arasında yol bulunamadı!")
+            
+            return route_coords
+        except Exception as e:
+            st.error(f"Rota hesaplanırken hata oluştu: {e}")
+            return None
+
+
     def create_advanced_route_map(self, routes):
-        """Gelişmiş rota haritası oluşturma"""
+        """Create a folium map with routes using OSMNX for real roads."""
         center_lat = self.data['Latitude'].mean()
         center_lon = self.data['Longitude'].mean()
         
-        m = folium.Map(location=[center_lat, center_lon], zoom_start=10)
-        
-        colors = [
-            'red', 'blue', 'green', 'purple', 'orange', 
-            'darkred', 'darkblue', 'cadetblue', 'darkgreen', 
-            'darkpurple', 'pink', 'lightred', 'beige'
-        ]
-        
-        # Depo marker
+        m = folium.Map(location=[center_lat, center_lon], zoom_start=12)
+
+        colors = ['red', 'blue', 'green', 'purple', 'orange']
+
+        # Depot marker
         depot_row = self.data.iloc[self.depot_index]
         folium.Marker(
             [depot_row['Latitude'], depot_row['Longitude']],
-            popup="Depo",
+            popup="Depot",
             icon=folium.Icon(color='black', icon='home')
         ).add_to(m)
-        
+
         for idx, row in self.data.iterrows():
             if idx == self.depot_index:
                 continue
-            marker_color = 'gray' if idx in self.unvisited_nodes else 'green'
-            icon_type = 'exclamation' if idx in self.unvisited_nodes else 'info-sign'
-            
             folium.Marker(
                 [row['Latitude'], row['Longitude']],
-                popup=f"Müşteri {row['ID']} - Talep: {row['demand']}",
-                icon=folium.Icon(color=marker_color, icon=icon_type)
+                popup=f"Customer {row['ID']} - Demand: {row['demand']}",
+                icon=folium.Icon(color='green', icon='info-sign')
             ).add_to(m)
-        
+
         for vehicle, route in enumerate(routes):
             if not route:
                 continue
-            
+
             color = colors[vehicle % len(colors)]
-            route_coords = []
-            
             for i in range(len(route) - 1):
                 from_node, to_node = route[i], route[i+1]
                 from_data = self.data.iloc[from_node]
                 to_data = self.data.iloc[to_node]
-                
-                route_coords.append((from_data['Latitude'], from_data['Longitude']))
-                route_coords.append((to_data['Latitude'], to_data['Longitude']))
-            
-            if route_coords:
+
+                # OSMNX ile en kısa gerçek yol
+                road_coords = self.get_route_osmnx(
+                    (from_data['Latitude'], from_data['Longitude']),
+                    (to_data['Latitude'], to_data['Longitude'])
+                )
+
+                # Eğer yol bulunamazsa hata mesajı ver
+                if not road_coords:
+                    st.error(f"Araç {vehicle + 1} için {from_node} -> {to_node} arasında yol bulunamadı!")
+
+                # Haritaya yolu ekle
                 folium.PolyLine(
-                    route_coords,
+                    road_coords,
                     color=color,
                     weight=4,
                     opacity=0.7,
-                    popup=f"Araç {vehicle + 1} Rotası"
-                ).add_to(m)
-        
+                    popup=f"Vehicle {vehicle + 1} Route"
+            ).add_to(m)
         return m
 
 # Streamlit UI
