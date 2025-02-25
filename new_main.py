@@ -9,6 +9,7 @@ import math
 import requests
 import polyline
 from sklearn.cluster import KMeans
+import random
 
 ###############################################
 # Yardımcı Fonksiyonlar: 2‑opt, 3‑opt ve rota mesafesi hesaplama
@@ -65,6 +66,43 @@ def three_opt(route, dist_matrix):
             if improved:
                 break
     return best_route
+
+# Simulated Annealing function
+def simulated_annealing(initial_route, dist_matrix, initial_temp=1000, cooling_rate=0.995, stopping_temp=1):
+    def get_route_distance(route):
+        return compute_route_distance(route, dist_matrix)
+
+    def get_neighbor(route):
+        new_route = route.copy()
+        i, j = sorted(random.sample(range(1, len(route) - 1), 2))
+        new_route[i:j+1] = reversed(new_route[i:j+1])
+        return new_route
+
+    current_route = initial_route
+    current_distance = get_route_distance(current_route)
+    best_route = current_route
+    best_distance = current_distance
+    temperature = initial_temp
+
+    while temperature > stopping_temp:
+        neighbor_route = get_neighbor(current_route)
+        neighbor_distance = get_route_distance(neighbor_route)
+        delta_distance = neighbor_distance - current_distance
+
+        if delta_distance < 0 or random.random() < math.exp(-delta_distance / temperature):
+            current_route = neighbor_route
+            current_distance = neighbor_distance
+
+            if current_distance < best_distance:
+                best_route = current_route
+                best_distance = current_distance
+
+        temperature *= cooling_rate
+
+    return best_route, best_distance
+
+
+
 
 ###############################################
 # Gelişmiş VRP Çözücü – MILP ve Heuristic (Çoklu Depo, Locker Ataması, Forbidden Node Kısıtı, OSRM)
@@ -356,6 +394,51 @@ class AdvancedVRPSolver:
             }
         return route_assignments, []
 
+    def solve_vrp_heuristic_with_sa(self, vehicles_df, forbidden_groups=None):
+        # Step 1: Generate initial solution using heuristic
+        route_assignments, _ = self.solve_vrp_heuristic(vehicles_df, forbidden_groups)
+
+        # Step 2: Apply Simulated Annealing to each route
+        sa_optimized_routes = {}
+        for vid, rdata in route_assignments.items():
+            initial_route = rdata['route']
+            best_route, best_distance = simulated_annealing(initial_route, self.dist_matrix)
+            sa_optimized_routes[vid] = {
+                'route': best_route,
+                'distance': best_distance,
+                'demand': rdata['demand'],
+                'vehicle': rdata['vehicle']
+            }
+
+        # Step 3: Reassign routes to vehicles
+        vehicles_sorted = vehicles_df.sort_values(by='capacity', ascending=False)
+        final_route_assignments = {}
+        i = 0
+        for idx, row in vehicles_sorted.iterrows():
+            if i < len(sa_optimized_routes):
+                vid = list(sa_optimized_routes.keys())[i]
+                final_route_assignments[row['vehicle_id']] = sa_optimized_routes[vid]
+                i += 1
+        if i < len(sa_optimized_routes):
+            highest_vehicle = vehicles_sorted.iloc[0]
+            existing = final_route_assignments.get(highest_vehicle['vehicle_id'], {})
+            if existing and 'routes' in existing:
+                routes_list = existing['routes']
+            else:
+                routes_list = [existing['route']] if existing else []
+            for vid in list(sa_optimized_routes.keys())[i:]:
+                routes_list.append(sa_optimized_routes[vid]['route'])
+            total_distance = sum(compute_route_distance(r, self.dist_matrix) for r in routes_list)
+            total_demand = sum(sum(self.demands[node] for node in r if node not in self.depot_indices) for r in routes_list)
+            final_route_assignments[highest_vehicle['vehicle_id']] = {
+                'route': routes_list,
+                'distance': total_distance,
+                'demand': total_demand,
+                'vehicle': highest_vehicle.to_dict()
+            }
+        return final_route_assignments, []
+
+
     ##########################################################
     # OSRM tabanlı interaktif rota görselleştirme
     ##########################################################
@@ -580,8 +663,28 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
     # ---------------------------
     # Rota Çözümleme: Kullanıcının seçtiği yönteme göre
     # ---------------------------
-    method = st.sidebar.selectbox("Çözüm Yöntemi Seçiniz:", ["Heuristic (Hızlı)", "MILP (Optimal Ama Yavaş)"])
-    if method == "MILP (Optimal Ama Yavaş)":
+    method = st.sidebar.selectbox("Çözüm Yöntemi Seçiniz:", ["Heuristic (Hızlı)", "MILP (Optimal Ama Yavaş)", "Heuristic + Simulated Annealing (SA)"])
+    
+    if method == "Heuristic + Simulated Annealing (SA)":
+        solver = AdvancedVRPSolver(st.session_state.data_for_vrp)
+        route_costs, _ = solver.solve_vrp_heuristic_with_sa(st.session_state.vehicles_df, forbidden_groups=st.session_state.forbidden_groups)
+        
+        # Calculate total cost
+        total_cost = sum(rdata['vehicle']['fixed_cost'] + rdata['vehicle']['cost_per_km'] * rdata['distance']
+                        for rdata in route_costs.values())
+        
+        st.header("Rotalama Sonuçları (Heuristic + Simulated Annealing)")
+        st.metric("Toplam Maliyet", f"{total_cost:.2f} TL")
+        with st.expander("Rota Detayları"):
+            for vid, rdata in route_costs.items():
+                route_ids = [str(solver.data.iloc[node]['ID']) for node in rdata['route']]
+                st.write(f"Araç {vid}: Rota (ID'ler) -> {route_ids} | Mesafe: {rdata['distance']:.2f} km | Toplam Talep: {rdata['demand']:.2f}")
+        route_map = solver.create_advanced_route_map(route_costs, st.session_state.data_for_vrp)
+        folium_static(route_map, width=1000, height=600)
+
+
+
+    elif method == "MILP (Optimal Ama Yavaş)":
         routes, total_cost = AdvancedVRPSolver(st.session_state.data_for_vrp).solve_vrp_milp(st.session_state.vehicles_df, 
                                                                                              time_limit=st.sidebar.number_input("MILP Zaman Limiti (saniye):", min_value=1, value=600, step=1))
         if routes is not None:
