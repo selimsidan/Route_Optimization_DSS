@@ -3,6 +3,8 @@ import pandas as pd
 import numpy as np
 import pulp
 import folium
+from folium import Icon
+import pandas as pd
 from streamlit_folium import st_folium, folium_static
 from geopy import distance
 import math
@@ -352,23 +354,23 @@ class AdvancedVRPSolver:
     # OSRM tabanlı interaktif rota görselleştirme
     ##########################################################
     def create_advanced_route_map(self, route_costs, data_source):
-        # data_source: görselleştirmede kullanılacak veri (orijinal ya da güncel VRP verisi)
+        # Harita merkezi
         center_lat = self.data['Latitude'].mean()
         center_lon = self.data['Longitude'].mean()
         m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
 
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 
-                  'darkblue', 'cadetblue', 'darkgreen', 'darkpurple', 'pink',
-                  'lightred', 'beige', 'lightblue', 'lightgreen', 'gray']
+                'darkblue', 'cadetblue', 'darkgreen', 'darkpurple', 'pink',
+                'lightred', 'beige', 'lightblue', 'lightgreen', 'gray']
 
-        # Tüm noktaları ekleyelim:
+        # Tüm nodelara simge ekleyelim
         for idx, row in data_source.iterrows():
             node_type = row['node_type']
             deliver_type = row.get('deliver_type', 'none')
             lat, lon = row['Latitude'], row['Longitude']
             if node_type == 'depot':
                 marker_color = 'black'
-                icon_ = 'home'
+                icon_ = 'factory'  # Depo için fabrika simgesi
                 popup_text = f"Depo (ID: {row['ID']})"
             elif node_type == 'locker':
                 marker_color = 'gray'
@@ -376,15 +378,17 @@ class AdvancedVRPSolver:
                 popup_text = f"Locker (ID: {row['ID']}) - Kapasite: {row.get('remaining_capacity', row['demand'])}"
             else:
                 marker_color = 'blue' if deliver_type == 'last_feet' else 'orange'
-                icon_ = 'info-sign'
+                icon_ = 'home'  # Müşteri için ev simgesi
                 popup_text = f"Müşteri (ID: {row['ID']}) - Talep: {row['demand']} - {deliver_type}"
+
+            # Marker'ı ekleyelim
             folium.Marker(
                 [lat, lon],
                 popup=popup_text,
                 icon=folium.Icon(color=marker_color, icon=icon_)
             ).add_to(m)
 
-        # Last Mile atamalarını kesikli çizgi ile gösterelim.
+        # Last Mile atamalarını kesikli çizgi ile gösterelim
         assigned_lockers = data_source[data_source['deliver_type'] == 'last_mile']
         for _, row in assigned_lockers.iterrows():
             if pd.notnull(row.get('assigned_locker')):
@@ -401,7 +405,7 @@ class AdvancedVRPSolver:
                         tooltip=f"Last Mile: Müşteri {row['ID']} -> Locker {row['assigned_locker']}"
                     ).add_to(m)
 
-        # Rota segmentlerini OSRM kullanarak çizelim.
+        # Rota segmentlerini OSRM ile çizelim
         osrm_cache = {}
         for idx, (vid, rdata) in enumerate(route_costs.items()):
             route_val = rdata.get('route', None)
