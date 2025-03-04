@@ -67,15 +67,31 @@ def three_opt(route, dist_matrix):
                 break
     return best_route
 
-def simulated_annealing(initial_route, dist_matrix, initial_temp=1000, cooling_rate=0.99, stopping_temp=1, max_restarts=20, patience=1000):
+def simulated_annealing(initial_route, dist_matrix, initial_temp=1000, cooling_rate=0.99, stopping_temp=1, max_restarts=100, patience=1000):
     def get_route_distance(route):
         return compute_route_distance(route, dist_matrix)
 
     def get_neighbor(route):
-        # Example of 2-opt neighbor generation
+        # Preserve the start and end nodes (depots)
         new_route = route.copy()
-        i, j = sorted(random.sample(range(1, len(route) - 1), 2))
-        new_route[i:j+1] = reversed(new_route[i:j+1])
+        start, end = new_route[0], new_route[-1]
+        intermediate_nodes = new_route[1:-1]
+        
+        # Randomly choose between 2-opt and 3-opt
+        if random.random() < 0.5:
+            # 2-opt move
+            i, j = sorted(random.sample(range(len(intermediate_nodes)), 2))
+            intermediate_nodes[i:j+1] = reversed(intermediate_nodes[i:j+1])
+        else:
+            # 3-opt move
+            if len(intermediate_nodes) < 3:
+                return new_route  # Not enough nodes for 3-opt
+            i, j, k = sorted(random.sample(range(len(intermediate_nodes)), 3))
+            segments = [intermediate_nodes[:i], intermediate_nodes[i:j], intermediate_nodes[j:k], intermediate_nodes[k:]]
+            new_route = [start] + segments[0] + segments[1][::-1] + segments[2][::-1] + segments[3] + [end]
+            return new_route
+
+        new_route = [start] + intermediate_nodes + [end]
         return new_route
 
     best_overall_route = initial_route
@@ -118,7 +134,6 @@ def simulated_annealing(initial_route, dist_matrix, initial_temp=1000, cooling_r
 
         # Shake up the initial route if no improvement
         if best_overall_distance == get_route_distance(initial_route):
-            random.shuffle(initial_route)
+            random.shuffle(initial_route[1:-1])  # Shuffle only intermediate nodes
 
     return best_overall_route, best_overall_distance
-
