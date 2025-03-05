@@ -13,13 +13,36 @@ import random
 import utils
 from utils import compute_route_distance, two_opt, three_opt, simulated_annealing
 from vrp_solver import AdvancedVRPSolver
+import time  # Progress bar için gerekli
+import base64  # Örnek dosya indirmek için gerekli
+import io
+
 
 
 ###############################################
 # Streamlit Uygulaması – Dosya Yükleme ve Node Yönetimi
 ###############################################
 
+
+    
+
 st.set_page_config(page_title="Gelişmiş VRP Çözümleme", layout="wide")
+
+
+
+# **Tema stilini uygula**
+dark_theme = """
+<style>
+    body { background-color: #121212; color: white; }
+    .stApp { background-color: #121212; color: white; }
+    .stButton > button { background-color: #333; color: white; }
+    .stTextInput > div > div > input { background-color: #333; color: white; }
+    .stFileUploader > div { background-color: #333; color: white; }
+</style>
+"""
+st.markdown(dark_theme, unsafe_allow_html=True)
+
+
 st.title("🚚 Gelişmiş Araç Rotalama Problemi Çözücü (İstanbul)")
 
 # Sidebar’da forbidden node grupları (önceki kısım)…
@@ -43,31 +66,112 @@ if st.session_state.forbidden_groups:
     for grp in st.session_state.forbidden_groups:
         st.sidebar.write(grp)
 
-# Dosya yükleme
-uploaded_nodes_file = st.file_uploader("Lokasyon Dosyası Yükle", type="xlsx", key="nodes")
-uploaded_vehicles_file = st.file_uploader("Araç Dosyası Yükle", type="xlsx", key="vehicles")
+st.title("Veri Yükleme Paneli 📂")
 
+# Kullanıcılara açıklama ekleyelim
+st.markdown("""
+**Lütfen aşağıdaki dosyaları yükleyin:**
+- **Lokasyon Dosyası**: `Latitude`, `Longitude`, `demand`, `node_type`, `deliver_type` kolonlarını içermelidir.
+- **Araç Dosyası**: `vehicle_id`, `capacity`, `max_duration`, `cost_per_km`, `fixed_cost` kolonlarını içermelidir.
+""")
+
+# Örnek Excel Dosyası Oluşturma
+def create_example_file():
+    sample_data = {
+        "id": ["Adana1", "Locker2"],
+        "Latitude": [40.123, 41.456],
+        "Longitude": [29.789, 30.123],
+        "demand": [5, 10],
+        "node_type": ["depot", "customer"],
+        "deliver_type": ["normal", "last_mile"]
+    }
+    df = pd.DataFrame(sample_data)
+    
+    # Excel dosyasını belleğe kaydet
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False)
+    output.seek(0)
+    return output
+
+# Örnek dosya indirme bağlantısı
+st.download_button(
+    label="📥 Örnek Lokasyon Dosyasını İndir",
+    data=create_example_file(),
+    file_name="ornek_lokasyon.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+)
+
+# Dosya yükleme alanı
+st.markdown("### 📍 Lokasyon Dosyası Yükle")
+uploaded_nodes_file = st.file_uploader("Lokasyon Dosyası (Excel formatında)", type="xlsx", key="nodes")
+
+st.markdown("### 🚗 Araç Dosyası Yükle")
+uploaded_vehicles_file = st.file_uploader("Araç Dosyası (Excel formatında)", type="xlsx", key="vehicles")
+
+# Dosya önizleme fonksiyonu
+def preview_uploaded_file(file, file_type):
+    if file is not None:
+        try:
+            df = pd.read_excel(file)
+            st.write(f"📋 **{file_type} Dosyası Önizleme:**")
+            st.dataframe(df.head())  # İlk 5 satırı göster
+            return df
+        except Exception as e:
+            st.error(f"❌ Hata: Dosya okunamadı! Geçerli bir Excel dosyası yüklediğinizden emin olun. ({str(e)})")
+            return None
+    return None
+
+# Yüklenen dosyaların önizlemesini gösterelim
+original_data = preview_uploaded_file(uploaded_nodes_file, "Lokasyon")
+vehicles_df = preview_uploaded_file(uploaded_vehicles_file, "Araç")
+
+# Dosya yükleme kontrolü ve geri bildirim
 if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
+    with st.spinner("Dosyalar yükleniyor... ⏳"):  # Yükleme sırasında spinner göster
+        time.sleep(1)  # Simüle edilen gecikme
+
+    st.success("✔️ Dosyalar başarıyla yüklendi!")  # Başarılı yükleme mesajı
+
+    # Progress bar simülasyonu
+    progress_bar = st.progress(0)
+    for i in range(100):
+        time.sleep(0.02)
+        progress_bar.progress(i + 1)
+
+    # Excel dosyalarını oku
     original_data = pd.read_excel(uploaded_nodes_file)
     vehicles_df = pd.read_excel(uploaded_vehicles_file)
+
+    # Verileri session_state'e kaydet
     st.session_state.original_data = original_data.copy()
+
+    # Gerekli kolonları kontrol et
     needed_node_cols = ['Latitude', 'Longitude', 'demand', 'node_type', 'deliver_type']
-    if not all(col in original_data.columns for col in needed_node_cols):
-        st.error(f"Lokasyon dosyasında şu kolonlar eksik veya hatalı: {needed_node_cols}")
-        st.stop()
     needed_vehicle_cols = ['vehicle_id', 'capacity', 'max_duration', 'cost_per_km', 'fixed_cost']
-    if not all(col in vehicles_df.columns for col in needed_vehicle_cols):
-        st.error(f"Araç dosyasında şu kolonlar eksik veya hatalı: {needed_vehicle_cols}")
+
+    if not all(col in original_data.columns for col in needed_node_cols):
+        st.error(f"❌ Lokasyon dosyasında şu kolonlar eksik veya hatalı: {needed_node_cols}")
         st.stop()
+
+    if not all(col in vehicles_df.columns for col in needed_vehicle_cols):
+        st.error(f"❌ Araç dosyasında şu kolonlar eksik veya hatalı: {needed_vehicle_cols}")
+        st.stop()
+
+    # Verileri işleyelim
     depot_df = original_data[original_data['node_type'] == 'depot'].copy()
     locker_df = original_data[original_data['node_type'] == 'locker'].copy()
     customer_df = original_data[original_data['node_type'] == 'customer'].copy()
+
     if depot_df.empty:
-        st.error("En az bir depo bulunmalıdır!")
+        st.error("❌ En az bir depo bulunmalıdır!")
         st.stop()
+
     if not locker_df.empty:
         locker_df['remaining_capacity'] = locker_df['demand']
+
     max_lock_distance = st.sidebar.number_input("Maksimum Locker Atama Mesafesi (km):", min_value=0.1, value=2.0, step=0.1)
+
     last_mile_mask = (customer_df['deliver_type'] == 'last_mile')
     for idx, row in customer_df[last_mile_mask].iterrows():
         cust_coord = (row['Latitude'], row['Longitude'])
@@ -77,6 +181,7 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
             d_km = distance.distance(cust_coord, locker_coord).kilometers
             if d_km <= max_lock_distance and l_row['remaining_capacity'] >= row['demand']:
                 candidate_lockers.append((l_idx, d_km))
+
         if candidate_lockers:
             candidate_lockers.sort(key=lambda x: x[1])
             chosen_locker_idx = candidate_lockers[0][0]
@@ -86,11 +191,15 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
             customer_df.drop(idx, inplace=True)
         else:
             customer_df.at[idx, 'deliver_type'] = 'last_feet'
+
     data_for_vrp = pd.concat([depot_df, locker_df, customer_df], ignore_index=True)
+
     # Veriyi session_state’de saklayalım.
     st.session_state.data_for_vrp = data_for_vrp.copy()
     if "vehicles_df" not in st.session_state:
         st.session_state.vehicles_df = vehicles_df.copy()
+
+    st.success("✅ Veriler başarıyla işlendi ve kaydedildi!")
 
     # ---------------------------
     # Node Yönetimi (Sil / Ekle) Kontrolleri
@@ -187,24 +296,24 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
         else:
             st.error("MILP çözümü bulunamadı.")
     else:
-        route_costs, _ = AdvancedVRPSolver(st.session_state.data_for_vrp).solve_vrp_heuristic(st.session_state.vehicles_df, 
+        with st.spinner('Rota hesaplanıyor...'):
+            route_costs, _ = AdvancedVRPSolver(st.session_state.data_for_vrp).solve_vrp_heuristic(st.session_state.vehicles_df, 
                                                                                               forbidden_groups=st.session_state.forbidden_groups)
-        total_cost = sum(rdata['vehicle']['fixed_cost'] + rdata['vehicle']['cost_per_km'] * rdata['distance']
-                         for rdata in route_costs.values())
-        st.header("Rotalama Sonuçları (Heuristic)")
-        st.metric("Toplam Maliyet", f"{total_cost:.2f} TL")
-        with st.expander("Rota Detayları"):
-            for vid, rdata in route_costs.items():
-                if isinstance(rdata['route'], list) and len(rdata['route']) > 0 and isinstance(rdata['route'][0], list):
-                    route_ids = [ [str(AdvancedVRPSolver(st.session_state.data_for_vrp).data.iloc[node]['ID']) for node in r] for r in rdata['route'] ]
-                elif isinstance(rdata['route'], list):
-                    route_ids = [str(AdvancedVRPSolver(st.session_state.data_for_vrp).data.iloc[node]['ID']) for node in rdata['route']]
-                else:
-                    route_ids = []
-                st.write(f"Araç {vid}: Rota (ID'ler) -> {route_ids} | Mesafe: {rdata['distance']:.2f} km | Toplam Talep: {rdata['demand']:.2f}")
-        route_map = AdvancedVRPSolver(st.session_state.data_for_vrp).create_advanced_route_map(route_costs, st.session_state.data_for_vrp)
-        folium_static(route_map, width=1000, height=600)
-
+            total_cost = sum(rdata['vehicle']['fixed_cost'] + rdata['vehicle']['cost_per_km'] * rdata['distance']
+                             for rdata in route_costs.values())
+            st.header("Rotalama Sonuçları (Heuristic)")
+            st.metric("Toplam Maliyet", f"{total_cost:.2f} TL")
+            with st.expander("Rota Detayları"):
+                for vid, rdata in route_costs.items():
+                    if isinstance(rdata['route'], list) and len(rdata['route']) > 0 and isinstance(rdata['route'][0], list):
+                        route_ids = [ [str(AdvancedVRPSolver(st.session_state.data_for_vrp).data.iloc[node]['ID']) for node in r] for r in rdata['route'] ]
+                    elif isinstance(rdata['route'], list):
+                        route_ids = [str(AdvancedVRPSolver(st.session_state.data_for_vrp).data.iloc[node]['ID']) for node in rdata['route']]
+                    else:
+                        route_ids = []
+                    st.write(f"Araç {vid}: Rota (ID'ler) -> {route_ids} | Mesafe: {rdata['distance']:.2f} km | Toplam Talep: {rdata['demand']:.2f}")
+            route_map = AdvancedVRPSolver(st.session_state.data_for_vrp).create_advanced_route_map(route_costs, st.session_state.data_for_vrp)
+            folium_static(route_map, width=1000, height=600)
 else:
     st.warning("Lütfen hem lokasyon/tip bilgilerini hem de araç bilgilerini içeren Excel dosyalarını yükleyiniz.")
 
