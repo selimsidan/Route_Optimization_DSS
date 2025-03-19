@@ -170,32 +170,12 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
     if not locker_df.empty:
         locker_df['remaining_capacity'] = locker_df['demand']
 
-    max_lock_distance = st.sidebar.number_input("Maksimum Locker Atama Mesafesi (km):", min_value=0.1, value=2.0, step=0.1)
-
-    last_mile_mask = (customer_df['deliver_type'] == 'last_mile')
-    for idx, row in customer_df[last_mile_mask].iterrows():
-        cust_coord = (row['Latitude'], row['Longitude'])
-        candidate_lockers = []
-        for l_idx, l_row in locker_df.iterrows():
-            locker_coord = (l_row['Latitude'], l_row['Longitude'])
-            d_km = distance.distance(cust_coord, locker_coord).kilometers
-            if d_km <= max_lock_distance and l_row['remaining_capacity'] >= row['demand']:
-                candidate_lockers.append((l_idx, d_km))
-
-        if candidate_lockers:
-            candidate_lockers.sort(key=lambda x: x[1])
-            chosen_locker_idx = candidate_lockers[0][0]
-            locker_df.at[chosen_locker_idx, 'remaining_capacity'] -= row['demand']
-            assigned_locker_id = locker_df.at[chosen_locker_idx, 'ID'] if 'ID' in locker_df.columns else chosen_locker_idx
-            customer_df.at[idx, 'assigned_locker'] = assigned_locker_id
-            customer_df.drop(idx, inplace=True)
-        else:
-            customer_df.at[idx, 'deliver_type'] = 'last_feet'
 
     data_for_vrp = pd.concat([depot_df, locker_df, customer_df], ignore_index=True)
 
     # Veriyi session_state’de saklayalım.
     st.session_state.data_for_vrp = data_for_vrp.copy()
+    st.session_state.original_data_for_vrp = data_for_vrp.copy()
     if "vehicles_df" not in st.session_state:
         st.session_state.vehicles_df = vehicles_df.copy()
 
@@ -295,25 +275,37 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
             folium_static(route_map, width=1000, height=600)
         else:
             st.error("MILP çözümü bulunamadı.")
+    # heuristic
     else:
-        with st.spinner('Rota hesaplanıyor...'):
-            route_costs, _ = AdvancedVRPSolver(st.session_state.data_for_vrp).solve_vrp_heuristic(st.session_state.vehicles_df, 
-                                                                                              forbidden_groups=st.session_state.forbidden_groups)
-            total_cost = sum(rdata['vehicle']['fixed_cost'] + rdata['vehicle']['cost_per_km'] * rdata['distance']
-                             for rdata in route_costs.values())
-            st.header("Rotalama Sonuçları (Heuristic)")
-            st.metric("Toplam Maliyet", f"{total_cost:.2f} TL")
-            with st.expander("Rota Detayları"):
+        with st.spinner("Calculating route..."):
+            solver = AdvancedVRPSolver(st.session_state.data_for_vrp)
+            route_costs, total_cost = solver.solve_vrp_heuristic(
+                st.session_state.vehicles_df,
+                forbidden_groups=st.session_state.get("forbidden_groups", [])
+            )
+            st.session_state.routing_data = solver.data_routing.copy()
+            
+            st.header("Route Results (Heuristic)")
+            st.metric("Total Cost", f"{total_cost:.2f} TL")
+            with st.expander("Route Details"):
                 for vid, rdata in route_costs.items():
-                    if isinstance(rdata['route'], list) and len(rdata['route']) > 0 and isinstance(rdata['route'][0], list):
-                        route_ids = [ [str(AdvancedVRPSolver(st.session_state.data_for_vrp).data.iloc[node]['ID']) for node in r] for r in rdata['route'] ]
-                    elif isinstance(rdata['route'], list):
-                        route_ids = [str(AdvancedVRPSolver(st.session_state.data_for_vrp).data.iloc[node]['ID']) for node in rdata['route']]
-                    else:
-                        route_ids = []
-                    st.write(f"Araç {vid}: Rota (ID'ler) -> {route_ids} | Mesafe: {rdata['distance']:.2f} km | Toplam Talep: {rdata['demand']:.2f}")
-            route_map = AdvancedVRPSolver(st.session_state.data_for_vrp).create_advanced_route_map(route_costs, st.session_state.data_for_vrp)
+                    st.write(
+                        f"Vehicle {vid}: Route -> {rdata.get('display_route', rdata['route'])} | "
+                        f"Distance: {rdata['distance']:.2f} km | Penalty: {rdata.get('penalty', 0):.2f} | "
+                        f"Cost: {rdata.get('cost', 0):.2f} | Demand: {rdata['demand']:.2f}"
+                    )
+            
+            # Create the route map using your existing advanced map function.
+            route_map = solver.create_advanced_route_map(
+                route_costs,
+                st.session_state.original_data_for_vrp,
+                st.session_state.routing_data
+            )
+            # Now overlay dashed lines for locker assignments.
+            route_map = solver.create_dashed_lines_map(route_map, st.session_state.routing_data, st.session_state.original_data_for_vrp)
             folium_static(route_map, width=1000, height=600)
+
+
 else:
     st.warning("Lütfen hem lokasyon/tip bilgilerini hem de araç bilgilerini içeren Excel dosyalarını yükleyiniz.")
 
