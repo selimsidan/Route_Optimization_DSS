@@ -15,6 +15,7 @@ import random
 import utils
 from utils import compute_route_distance, two_opt, three_opt, simulated_annealing
 
+
 ###############################################
 # Gelişmiş VRP Çözücü – MILP ve Heuristic (Çoklu Depo, Locker Ataması, Forbidden Node Kısıtı, OSRM)
 ###############################################
@@ -358,11 +359,31 @@ class AdvancedVRPSolver:
         center_lat = self.data['Latitude'].mean()
         center_lon = self.data['Longitude'].mean()
         m = folium.Map(location=[center_lat, center_lon], zoom_start=11)
-
+        
+        # Daha belirgin ve ayırt edilebilir renkler
         colors = ['red', 'blue', 'green', 'purple', 'orange', 'darkred', 
                 'darkblue', 'cadetblue', 'darkgreen', 'darkpurple', 'pink',
                 'lightred', 'beige', 'lightblue', 'lightgreen', 'gray']
+        
+        # Araçları renklerle eşleştiren bir sözlük oluşturalım 
+        vehicle_colors = {}
+        for idx, vid in enumerate(route_costs.keys()):
+            vehicle_colors[vid] = colors[idx % len(colors)]
+        
+        # Araç renk lejantını ekleyelim
+        legend_html = '''
+        <div style="position: fixed; bottom: 50px; left: 50px; width: 180px; 
+        background-color: white; border: 2px solid grey; z-index: 9999; font-size: 14px;
+        padding: 10px; border-radius: 5px;">
+        <p style="margin:0; font-weight: bold;">Araç Renkleri</p>
+        '''
 
+        for vid, color in vehicle_colors.items():
+            legend_html += f'<p style="margin:0;"><span style="background-color:{color}; ' + \
+                        f'display: inline-block; width: 15px; height: 15px; margin-right: 5px;"></span>Araç {vid}</p>'
+
+        legend_html += '</div>'
+        
         # Tüm nodelara simge ekleyelim
         for idx, row in data_source.iterrows():
             node_type = row['node_type']
@@ -405,9 +426,9 @@ class AdvancedVRPSolver:
                         tooltip=f"Last Mile: Müşteri {row['ID']} -> Locker {row['assigned_locker']}"
                     ).add_to(m)
 
-        # Rota segmentlerini OSRM ile çizelim
+        # Rota segmentlerini OSRM ile çizelim ve oklar ekleyelim
         osrm_cache = {}
-        for idx, (vid, rdata) in enumerate(route_costs.items()):
+        for vid, rdata in route_costs.items():
             route_val = rdata.get('route', None)
             if route_val is None or isinstance(route_val, int):
                 continue
@@ -418,33 +439,91 @@ class AdvancedVRPSolver:
                     routes = route_val
             else:
                 continue
-            color = colors[idx % len(colors)]
-            for route in routes:
+                
+            color = vehicle_colors[vid]
+            for route_idx, route in enumerate(routes):
                 if not isinstance(route, list):
                     continue
                 if not route or len(route) < 2:
                     continue
-                full_route_coords = []
-                for i in range(len(route)-1):
+                    
+                # Rotanın noktalarını ve detaylarını tutacak liste
+                route_points = []
+                node_ids = []
+                
+                for i in range(len(route) - 1):
                     start_node = route[i]
-                    end_node = route[i+1]
+                    end_node = route[i + 1]
                     start_coord = (self.data.iloc[start_node]['Latitude'], self.data.iloc[start_node]['Longitude'])
                     end_coord = (self.data.iloc[end_node]['Latitude'], self.data.iloc[end_node]['Longitude'])
+                    
+                    # Düğüm ID'lerini saklayalım
+                    start_id = self.data.iloc[start_node]['ID']
+                    end_id = self.data.iloc[end_node]['ID']
+                    node_ids.append((start_id, end_id))
+                    
+                    # OSRM ile gerçek yol koordinatlarını alalım
                     segment_coords = self.get_osrm_route(start_coord, end_coord, osrm_cache)
                     if not segment_coords:
                         segment_coords = [start_coord, end_coord]
-                    if full_route_coords:
-                        full_route_coords.extend(segment_coords[1:])
+                    
+                    # Segment bilgilerini saklayalım
+                    route_points.append({
+                        'start': start_coord,
+                        'end': end_coord,
+                        'coords': segment_coords,
+                        'start_id': start_id,
+                        'end_id': end_id
+                    })
+                    
+                    # Ana rotayı çizelim
+                    line = folium.PolyLine(
+                        segment_coords,
+                        color=color,
+                        weight=4,
+                        opacity=0.8,
+                        popup=f"Araç {vid} - Segment {i+1}: {start_id} → {end_id}",
+                        tooltip=f"Araç {vid}: {start_id} → {end_id}"
+                    ).add_to(m)
+                    
+                    # Her segment için ok simgesi ekleyelim
+                    if len(segment_coords) >= 2:
+                        mid_idx = len(segment_coords) // 2
+                        midpoint = segment_coords[mid_idx]
+                        
+                        # Add an arrow at the midpoint of the segment
+                        folium.RegularPolygonMarker(
+                            location=midpoint,
+                            color=color,
+                            number_of_sides=3,
+                            radius=6,
+                            rotation=0,  # No need for rotation calculation
+                            fill_color=color,
+                            fill_opacity=0.8,
+                            popup=f"Yön: {start_id} → {end_id}"
+                        ).add_to(m)
+                # Tüm rotayı birleştirip genel bilgi ekleyelim
+                all_coords = []
+                for point_data in route_points:
+                    if not all_coords:
+                        all_coords.extend(point_data['coords'])
                     else:
-                        full_route_coords.extend(segment_coords)
-                folium.PolyLine(
-                    full_route_coords,
-                    color=color,
-                    weight=4,
-                    opacity=0.7,
-                    popup=f"Araç {vid} Rotası (Maliyet: {rdata.get('cost', 0):.2f})",
-                    tooltip=f"Araç ID: {vid}"
+                        all_coords.extend(point_data['coords'][1:])
+                
+                # Rota bilgisini ekleyelim
+                route_id_str = " → ".join([str(self.data.iloc[n]['ID']) for n in route])
+                folium.Popup(
+                    f"""
+                    <div style='width:200px'>
+                    <b>Araç {vid} - Rota {route_idx+1}</b><br>
+                    Toplam Mesafe: {compute_route_distance(route, self.dist_matrix):.2f} km<br>
+                    Sıralama: {route_id_str}
+                    </div>
+                    """
                 ).add_to(m)
-
+        
+        # Haritaya araç renk lejantını ekleyelim
+        m.get_root().html.add_child(folium.Element(legend_html))
         folium.LayerControl().add_to(m)
+        
         return m

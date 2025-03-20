@@ -43,7 +43,7 @@ dark_theme = """
 st.markdown(dark_theme, unsafe_allow_html=True)
 
 
-st.title("🚚 Gelişmiş Araç Rotalama Problemi Çözücü (İstanbul)")
+st.title("Gelişmiş Araç Rotalama Problemi Çözücü ")
 
 # Sidebar’da forbidden node grupları (önceki kısım)…
 st.sidebar.subheader("Aynı Rotada Bulunamayacak Nodelar")
@@ -66,7 +66,7 @@ if st.session_state.forbidden_groups:
     for grp in st.session_state.forbidden_groups:
         st.sidebar.write(grp)
 
-st.title("Veri Yükleme Paneli 📂")
+st.title("Veri Yükleme Paneli")
 
 # Kullanıcılara açıklama ekleyelim
 st.markdown("""
@@ -103,10 +103,10 @@ st.download_button(
 )
 
 # Dosya yükleme alanı
-st.markdown("### 📍 Lokasyon Dosyası Yükle")
+st.markdown("### Lokasyon Dosyası Yükle")
 uploaded_nodes_file = st.file_uploader("Lokasyon Dosyası (Excel formatında)", type="xlsx", key="nodes")
 
-st.markdown("### 🚗 Araç Dosyası Yükle")
+st.markdown("### Araç Dosyası Yükle")
 uploaded_vehicles_file = st.file_uploader("Araç Dosyası (Excel formatında)", type="xlsx", key="vehicles")
 
 # Dosya önizleme fonksiyonu
@@ -114,7 +114,7 @@ def preview_uploaded_file(file, file_type):
     if file is not None:
         try:
             df = pd.read_excel(file)
-            st.write(f"📋 **{file_type} Dosyası Önizleme:**")
+            st.write(f"**{file_type} Dosyası Önizleme:**")
             st.dataframe(df.head())  # İlk 5 satırı göster
             return df
         except Exception as e:
