@@ -243,36 +243,40 @@ class AdvancedVRPSolver:
     def solve_vrp_heuristic(self, vehicles_df, forbidden_groups=None):
         """
         Hybrid heuristic for VRP with mixed home vs. locker deliveries.
-
+        
         This function does the following:
-
+        
         1. Data Preparation: Copies merged data and stores original customer coordinates.
         
         2. Clustering & Aggregation:
             - Uses DBSCAN to cluster customers with deliver_type 'last_mile'.
             - For each cluster, computes:
-                    total_direct_cost = sum(distance(nearest_depot, customer_home) * cost_per_km)
-                    total_locker_cost = sum((distance(nearest_depot, candidate_locker) * cost_per_km)
-                                            + (distance(candidate_locker, customer_home) * customer_cost))
+                        total_direct_cost = sum(distance(nearest_depot, customer_home) * cost_per_km)
+                        total_locker_cost = sum((distance(nearest_depot, candidate_locker) * cost_per_km)
+                                                + (distance(candidate_locker, customer_home) * customer_cost))
             - If the best locker option is cheaper than direct cost, the cluster is aggregated:
-                    * An aggregated node is created (of type 'locker_cluster') with:
-                        - Coordinates = chosen locker's coordinates.
-                        - Demand = sum of customer demands.
-                        - A field 'served_customers' listing the original customer indices.
-                    * The individual customer nodes in that cluster are removed.
-            - Otherwise, the customers remain as individual nodes.
+                    * For each customer in the cluster, update its coordinates to the chosen locker’s
+                    and set deliver_type to 'locker_pickup'.
+                    * Create an aggregated node (of type 'locker_cluster') representing the cluster
+                    (with demand = sum of customer demands, a field 'served_customers', and its ID set to the actual locker’s ID).
+            - Otherwise, customers remain as individual nodes.
+            - Post-processing: Merge aggregated nodes that are at nearly identical coordinates.
         
         3. Initial Route Construction using Clarke–Wright Savings:
-            - A new distance matrix is built (with distances converted to km).
-            - An initial solution is constructed with one route per non-depot node, then merged.
+            - Build a new distance matrix (with distances converted to km).
+            - For each non-depot node, find its nearest depot and initialize its route as:
+                        [nearest_depot, node, nearest_depot]
+            - Merge routes only if they share the same starting depot.
         
         4. Local Improvement (Simulated Annealing, SA):
             - SA explores neighborhood moves (e.g., toggling a customer’s mode).
-            - The objective function is the sum of travel cost (distance × cost_per_km) plus locker penalty
-                (for a locker-served customer, penalty = distance(customer’s original home, locker) × customer_cost).
+            - The objective function is the sum of travel cost (distance × cost_per_km) plus a penalty
+                for locker-served customers (penalty = distance(customer’s original home, locker) × customer_cost).
         
         5. Vehicle Assignment:
-            - The final routes are assigned to vehicles in a greedy fashion.
+            - Greedily assign the final routes to vehicles.
+            - Ensure each route ends with the depot it started from.
+            - **Updated:** When computing each route’s cost, add the penalty from aggregated nodes.
         
         Returns:
         route_assignments: dict mapping vehicle_id to route info (routes are lists of integer indices into the routing data).
@@ -280,7 +284,6 @@ class AdvancedVRPSolver:
         """
         import math, numpy as np, pandas as pd, random, copy
         from sklearn.cluster import DBSCAN
-        from utils import compute_route_distance  # if used elsewhere
 
         if forbidden_groups is None:
             forbidden_groups = []
@@ -298,7 +301,7 @@ class AdvancedVRPSolver:
 
         # ------------------
         # Phase 0: Data Preparation.
-        original_df = self.data.copy()  # Keep original merged data for markers.
+        original_df = self.data.copy()  # Keep original data for markers and penalty lookup.
         routing_df = self.data.copy()   # Work on a copy for routing.
         cust_mask = routing_df['node_type'].str.lower() == 'customer'
         if 'orig_Latitude' not in routing_df.columns:
@@ -319,7 +322,7 @@ class AdvancedVRPSolver:
         aggregated_customer_indices = set()
         if last_mile_indices:
             coords = routing_df.loc[last_mile_indices, ['Latitude', 'Longitude']].values
-            # eps=0.01 ~ 1.11 km (adjust as needed)
+            # eps=0.01 ~ 1.11 km; adjust if needed.
             clustering = DBSCAN(eps=0.01, min_samples=1).fit(coords)
             labels = clustering.labels_
             cluster_map = {}
@@ -367,23 +370,51 @@ class AdvancedVRPSolver:
                         self.locker_assignments[i] = {'assigned_locker': best_locker_for_cluster,
                                                     'cluster': label,
                                                     'locker_cost': best_total_locker_cost / len(indices)}
-                    # Create an aggregated node:
                     agg_demand = sum(routing_df.loc[i, 'demand'] for i in indices)
                     agg_node = {
                         'new_index': None,
-                        'original_index': indices,  # list of customer indices aggregated
+                        'original_index': indices,
                         'node_type': 'locker_cluster',
                         'deliver_type': 'locker_pickup',
                         'Latitude': routing_df.loc[best_locker_for_cluster, 'Latitude'],
                         'Longitude': routing_df.loc[best_locker_for_cluster, 'Longitude'],
                         'demand': agg_demand,
                         'served_customers': indices,
-                        'ID': f"LockerCluster({','.join(str(i) for i in indices)})"
+                        # Set the ID to be the actual locker ID.
+                        'ID': routing_df.loc[best_locker_for_cluster, 'ID'] if 'ID' in routing_df.columns 
+                            else f"Locker({best_locker_for_cluster})",
+                        'assigned_locker': best_locker_for_cluster
                     }
                     aggregated_nodes.append(agg_node)
                     aggregated_customer_indices.update(indices)
         # End Phase 1.
+        
+        # --- Post-Processing: Merge Aggregated Nodes That Are Nearly the Same ---
+        tolerance = 0.001  # degrees
+        unique_aggregated = []
+        for node in aggregated_nodes:
+            merged = False
+            for u_node in unique_aggregated:
+                if (abs(u_node['Latitude'] - node['Latitude']) < tolerance and
+                    abs(u_node['Longitude'] - node['Longitude']) < tolerance):
+                    u_node['served_customers'].extend(node['served_customers'])
+                    u_node['demand'] += node['demand']
+                    # Update the ID to be the actual locker ID if available.
+                    if 'assigned_locker' in node:
+                        u_node['ID'] = routing_df.loc[node['assigned_locker'], 'ID'] if 'ID' in routing_df.columns else f"Locker({node['assigned_locker']})"
+                        u_node['assigned_locker'] = node['assigned_locker']
+                    else:
+                        u_node['ID'] = f"LockerCluster({','.join(str(x) for x in u_node['served_customers'])})"
+                    merged = True
+                    break
+            if not merged:
+                new_node = node.copy()
+                if not isinstance(new_node.get('served_customers', None), list):
+                    new_node['served_customers'] = [new_node['original_index']]
+                unique_aggregated.append(new_node)
+        aggregated_nodes = unique_aggregated
 
+        # ------------------
         # Build new routing nodes:
         new_nodes = []
         # 1. Add depot nodes.
@@ -440,46 +471,55 @@ class AdvancedVRPSolver:
                 latA, lonA = routing_df.loc[a, 'Latitude'], routing_df.loc[a, 'Longitude']
                 latB, lonB = routing_df.loc[b, 'Latitude'], routing_df.loc[b, 'Longitude']
                 new_dist_mat[a][b] = deg_distance(latA, lonA, latB, lonB)
+        # Get all depot indices from routing_df.
         depot_rows = routing_df[routing_df['node_type'].str.lower() == 'depot']
         if depot_rows.empty:
             raise ValueError("No depot found in routing data.")
-        new_depot_index = depot_rows.index[0]
+        depot_indices_final = depot_rows.index.tolist()
 
         # ------------------
         # Phase 3: Initial solution using Clarke–Wright Savings.
-        routes = {}
-        for idx in range(num_nodes):
-            if idx == new_depot_index:
-                continue
-            routes[idx] = [new_depot_index, idx, new_depot_index]
+        # For each non-depot node, determine its nearest depot from routing_df.
+        initial_routes = {}
+        for idx in routing_df.index:
+            if routing_df.loc[idx, 'node_type'].strip().lower() != 'depot':
+                nearest_depot = min(depot_indices_final, key=lambda d: new_dist_mat[d][idx])
+                initial_routes[idx] = [nearest_depot, idx, nearest_depot]
+        # Merge routes only if they share the same starting depot.
         savings = []
-        for i in routes:
-            for j in routes:
+        for i in initial_routes:
+            for j in initial_routes:
                 if i >= j:
                     continue
-                s = new_dist_mat[new_depot_index][i] + new_dist_mat[new_depot_index][j] - new_dist_mat[i][j]
-                savings.append((s, i, j))
+                if initial_routes[i][0] == initial_routes[j][0]:
+                    s = new_dist_mat[initial_routes[i][0]][i] + new_dist_mat[initial_routes[i][0]][j] - new_dist_mat[i][j]
+                    savings.append((s, i, j))
         savings.sort(reverse=True, key=lambda x: x[0])
-        route_of = {i: i for i in routes}
+        route_of = {i: i for i in initial_routes}
         for s, i, j in savings:
             ri, rj = route_of[i], route_of[j]
-            if ri != rj:
-                merged = routes[ri][:-1] + routes[rj][1:]
-                routes[ri] = merged
-                for node in routes[rj][1:-1]:
+            if ri != rj and initial_routes[ri][0] == initial_routes[rj][0]:
+                merged = initial_routes[ri][:-1] + initial_routes[rj][1:]
+                initial_routes[ri] = merged
+                for node in initial_routes[rj][1:-1]:
                     route_of[node] = ri
-                del routes[rj]
-        final_routes = list(routes.values())
+                del initial_routes[rj]
+        final_routes = list(initial_routes.values())
+        # Ensure each route returns to its starting depot.
+        for r in final_routes:
+            depot_start = r[0]
+            if r[-1] != depot_start:
+                r.append(depot_start)
 
         # ------------------
         # Phase 4: Simulated Annealing (SA) for local improvement.
         def compute_solution_cost(routes_list, dist_mat, df):
             total = 0.0
             for r in routes_list:
-                for k in range(len(r) - 1):
+                for k in range(len(r)-1):
                     total += dist_mat[r[k]][r[k+1]] * cost_per_km
-                # For each customer served via locker (individual ones), add penalty.
                 for n in r:
+                    # For individual customer nodes served via locker.
                     if df.loc[n, 'node_type'].strip().lower() == 'customer' and \
                     df.loc[n, 'deliver_type'].strip().lower() == 'locker_pickup':
                         lat_orig = df.loc[n, 'orig_Latitude']
@@ -487,6 +527,14 @@ class AdvancedVRPSolver:
                         lat_curr = df.loc[n, 'Latitude']
                         lon_curr = df.loc[n, 'Longitude']
                         total += deg_distance(lat_orig, lon_orig, lat_curr, lon_curr) * float(df.loc[n, 'customer_cost'])
+                    # For aggregated locker nodes, sum penalty over served customers.
+                    elif df.loc[n, 'node_type'].strip().lower() == 'locker_cluster':
+                        served = df.loc[n, 'served_customers']
+                        # For each served customer, look up original coordinates in original_df.
+                        for cust_idx in served:
+                            cust_row = original_df.loc[cust_idx]
+                            total += deg_distance(cust_row['Latitude'], cust_row['Longitude'],
+                                                    df.loc[n, 'Latitude'], df.loc[n, 'Longitude']) * float(cust_row['customer_cost'])
             return total
 
         current_routes = copy.deepcopy(final_routes)
@@ -496,18 +544,16 @@ class AdvancedVRPSolver:
 
         def random_move(df):
             new_df = df.copy()
-            # Choose a random individual customer (not an aggregated cluster).
-            cust_idx = new_df[(new_df['node_type'].str.lower() == 'customer')].index.tolist()
+            cust_idx = new_df[new_df['node_type'].str.lower() == 'customer'].index.tolist()
             if not cust_idx:
                 return new_df
             i = random.choice(cust_idx)
             current_mode = new_df.loc[i, 'deliver_type'].strip().lower()
-            nearest_depot = min(self.depot_indices, key=lambda d: deg_distance(
+            nearest_depot = min(depot_indices_final, key=lambda d: deg_distance(
                 new_df.loc[d, 'Latitude'], new_df.loc[d, 'Longitude'],
                 new_df.loc[i, 'Latitude'], new_df.loc[i, 'Longitude']
             ))
             if current_mode == 'locker_pickup':
-                # Flip to direct: restore original coordinates.
                 new_df.loc[i, 'Latitude'] = new_df.loc[i, 'orig_Latitude']
                 new_df.loc[i, 'Longitude'] = new_df.loc[i, 'orig_Longitude']
                 new_df.loc[i, 'deliver_type'] = 'last_mile'
@@ -578,7 +624,6 @@ class AdvancedVRPSolver:
                         display_route.append(row.get('ID', n))
                 route_distance = sum(new_dist_mat[r[k]][r[k+1]] for k in range(len(r)-1))
                 route_demand = sum(routing_df.loc[n, 'demand'] for n in r if routing_df.loc[n, 'node_type'].strip().lower() == 'customer')
-                # Compute route cost: travel cost plus any penalty from individual locker pickups.
                 route_cost = route_distance * cost_per_km
                 route_penalty = 0.0
                 for n in r:
@@ -589,6 +634,13 @@ class AdvancedVRPSolver:
                         lat_curr = routing_df.loc[n, 'Latitude']
                         lon_curr = routing_df.loc[n, 'Longitude']
                         route_penalty += deg_distance(lat_orig, lon_orig, lat_curr, lon_curr) * float(routing_df.loc[n, 'customer_cost'])
+                    elif routing_df.loc[n, 'node_type'].strip().lower() == 'locker_cluster':
+                        # For an aggregated node, compute penalty for each served customer using original_df.
+                        served = routing_df.loc[n, 'served_customers']
+                        for cust_idx in served:
+                            cust_row = original_df.loc[cust_idx]
+                            route_penalty += deg_distance(cust_row['Latitude'], cust_row['Longitude'],
+                                                        routing_df.loc[n, 'Latitude'], routing_df.loc[n, 'Longitude']) * float(cust_row['customer_cost'])
                 route_cost += route_penalty
                 route_assignments[veh['vehicle_id']] = {
                     'route': r,
@@ -601,7 +653,6 @@ class AdvancedVRPSolver:
                 }
                 fr_idx += 1
 
-        # Compute total cost across all vehicles.
         total_cost = 0.0
         for vid, rdata in route_assignments.items():
             fixed = rdata['vehicle'].get('fixed_cost', 0.0)
@@ -609,6 +660,10 @@ class AdvancedVRPSolver:
 
         self.data_routing = routing_df.copy()
         return route_assignments, total_cost
+
+
+
+
 
 
 
@@ -664,6 +719,7 @@ class AdvancedVRPSolver:
     def create_advanced_route_map(self, route_costs, original_data, routing_data):
         import folium
         import pandas as pd
+        from folium.plugins import PolyLineTextPath  # added for arrows
 
         # Center the map using the original data (so all nodes are visible).
         center_lat = original_data['Latitude'].mean()
@@ -743,7 +799,7 @@ class AdvancedVRPSolver:
                 else:
                     full_route_coords.extend(segment_coords)
             if full_route_coords:
-                folium.PolyLine(
+                poly = folium.PolyLine(
                     full_route_coords,
                     color=colors[idx % len(colors)],
                     weight=4,
@@ -751,6 +807,15 @@ class AdvancedVRPSolver:
                     popup=f"Araç {vid} Rotası (Maliyet: {rdata.get('cost', 0):.2f})",
                     tooltip=f"Araç ID: {vid}"
                 ).add_to(m)
+                # --- Add arrow symbols along the route for direction ---
+                arrow = PolyLineTextPath(
+                    poly,
+                    ' ► ',
+                    repeat=True,
+                    offset=5,
+                    attributes={'fill': 'black', 'font-size': '16', 'font-weight': 'bold'}
+                )
+                arrow.add_to(m)
 
         folium.LayerControl().add_to(m)
         return m
