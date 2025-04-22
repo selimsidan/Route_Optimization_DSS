@@ -241,47 +241,6 @@ class AdvancedVRPSolver:
 # Heuristic Yöntem – Feasible Sweep Algoritması (Last Mile Versiyonu)
 ##########################################################
     def solve_vrp_heuristic(self, vehicles_df, forbidden_groups=None):
-        """
-        Hybrid heuristic for VRP with mixed home vs. locker deliveries.
-        
-        This function does the following:
-        
-        1. Data Preparation: Copies merged data and stores original customer coordinates.
-        
-        2. Clustering & Aggregation:
-            - Uses DBSCAN to cluster customers with deliver_type 'last_mile'.
-            - For each cluster, computes:
-                        total_direct_cost = sum(distance(nearest_depot, customer_home) * cost_per_km)
-                        total_locker_cost = sum((distance(nearest_depot, candidate_locker) * cost_per_km)
-                                                + (distance(candidate_locker, customer_home) * customer_cost))
-            - If the best locker option is cheaper than direct cost, the cluster is aggregated:
-                    * For each customer in the cluster, update its coordinates to the chosen locker’s
-                    and set deliver_type to 'locker_pickup'.
-                    * Create an aggregated node (of type 'locker_cluster') representing the cluster
-                    (with demand = sum of customer demands, a field 'served_customers', and its ID set to the actual locker’s ID).
-            - Otherwise, customers remain as individual nodes.
-            - Post-processing: Merge aggregated nodes that are at nearly identical coordinates.
-        
-        3. Initial Route Construction using Clarke–Wright Savings:
-            - Build a new distance matrix (with distances converted to km).
-            - For each non-depot node, find its nearest depot and initialize its route as:
-                        [nearest_depot, node, nearest_depot]
-            - Merge routes only if they share the same starting depot.
-        
-        4. Local Improvement (Simulated Annealing, SA):
-            - SA explores neighborhood moves (e.g., toggling a customer’s mode).
-            - The objective function is the sum of travel cost (distance × cost_per_km) plus a penalty
-                for locker-served customers (penalty = distance(customer’s original home, locker) × customer_cost).
-        
-        5. Vehicle Assignment:
-            - Greedily assign the final routes to vehicles.
-            - Ensure each route ends with the depot it started from.
-            - **Updated:** When computing each route’s cost, add the penalty from aggregated nodes.
-        
-        Returns:
-        route_assignments: dict mapping vehicle_id to route info (routes are lists of integer indices into the routing data).
-        total_cost: Total cost (sum of fixed cost and route cost) for all vehicles.
-        """
         import math, numpy as np, pandas as pd, random, copy
         from sklearn.cluster import DBSCAN
 
@@ -289,148 +248,147 @@ class AdvancedVRPSolver:
             forbidden_groups = []
 
         # PARAMETERS
-        cost_per_km = getattr(self, 'cost_per_km', vehicles_df['cost_per_km'].iloc[0])
+        cost_per_km      = getattr(self, 'cost_per_km', vehicles_df['cost_per_km'].iloc[0])
         vehicle_capacity = vehicles_df['capacity'].max()
         # SA parameters:
-        T = 100.0
-        T_min = 1e-3
-        alpha = 0.95
-        max_iter = 2000
-        # Conversion factor: ~111 km per degree.
+        T        = 500.0
+        T_min    = 1e-10
+        alpha    = 0.99
+        max_iter = 10000
         km_per_degree = 111.0
 
         # ------------------
-        # Phase 0: Data Preparation.
-        original_df = self.data.copy()  # Keep original data for markers and penalty lookup.
-        routing_df = self.data.copy()   # Work on a copy for routing.
-        cust_mask = routing_df['node_type'].str.lower() == 'customer'
+        # Phase 0: Data Preparation.
+        original_df = self.data.copy()
+        routing_df  = self.data.copy()
+        cust_mask   = routing_df['node_type'].str.lower() == 'customer'
         if 'orig_Latitude' not in routing_df.columns:
-            routing_df.loc[cust_mask, 'orig_Latitude'] = routing_df.loc[cust_mask, 'Latitude']
+            routing_df.loc[cust_mask, 'orig_Latitude']  = routing_df.loc[cust_mask, 'Latitude']
         if 'orig_Longitude' not in routing_df.columns:
             routing_df.loc[cust_mask, 'orig_Longitude'] = routing_df.loc[cust_mask, 'Longitude']
 
         # ------------------
         # Helper: distance in km between two points.
         def deg_distance(lat1, lon1, lat2, lon2):
-            return math.hypot((lat1 - lat2) * km_per_degree, (lon1 - lon2) * km_per_degree)
+            return math.hypot((lat1 - lat2) * km_per_degree,
+                            (lon1 - lon2) * km_per_degree)
 
         # ------------------
-        # Phase 1: Clustering & Aggregation.
+        # Phase 1: Clustering & Aggregation.
         mask_last_mile = cust_mask & (routing_df['deliver_type'].str.lower() == 'last_mile')
         last_mile_indices = routing_df[mask_last_mile].index.tolist()
         aggregated_nodes = []
         aggregated_customer_indices = set()
         if last_mile_indices:
-            coords = routing_df.loc[last_mile_indices, ['Latitude', 'Longitude']].values
-            # eps=0.01 ~ 1.11 km; adjust if needed.
+            coords = routing_df.loc[last_mile_indices, ['Latitude','Longitude']].values
             clustering = DBSCAN(eps=0.01, min_samples=1).fit(coords)
             labels = clustering.labels_
             cluster_map = {}
             for idx, label in zip(last_mile_indices, labels):
                 cluster_map.setdefault(label, []).append(idx)
-            locker_indices = routing_df[routing_df['node_type'].str.lower() == 'locker'].index.tolist()
+            locker_indices = routing_df[routing_df['node_type'].str.lower()=='locker'].index.tolist()
             for label, indices in cluster_map.items():
                 total_direct_cost = 0.0
                 for i in indices:
                     nearest_depot = min(self.depot_indices, key=lambda d: deg_distance(
-                        routing_df.loc[d, 'Latitude'], routing_df.loc[d, 'Longitude'],
-                        routing_df.loc[i, 'Latitude'], routing_df.loc[i, 'Longitude']
+                        routing_df.loc[d,'Latitude'], routing_df.loc[d,'Longitude'],
+                        routing_df.loc[i,'Latitude'], routing_df.loc[i,'Longitude']
                     ))
                     total_direct_cost += deg_distance(
-                        routing_df.loc[nearest_depot, 'Latitude'], routing_df.loc[nearest_depot, 'Longitude'],
-                        routing_df.loc[i, 'Latitude'], routing_df.loc[i, 'Longitude']
+                        routing_df.loc[nearest_depot,'Latitude'], routing_df.loc[nearest_depot,'Longitude'],
+                        routing_df.loc[i,'Latitude'], routing_df.loc[i,'Longitude']
                     ) * cost_per_km
+
                 best_total_locker_cost = float('inf')
                 best_locker_for_cluster = None
                 for l in locker_indices:
                     cluster_cost = 0.0
                     for i in indices:
                         nearest_depot = min(self.depot_indices, key=lambda d: deg_distance(
-                            routing_df.loc[d, 'Latitude'], routing_df.loc[d, 'Longitude'],
-                            routing_df.loc[i, 'Latitude'], routing_df.loc[i, 'Longitude']
+                            routing_df.loc[d,'Latitude'], routing_df.loc[d,'Longitude'],
+                            routing_df.loc[i,'Latitude'], routing_df.loc[i,'Longitude']
                         ))
-                        cost_i = (deg_distance(routing_df.loc[nearest_depot, 'Latitude'],
-                                                routing_df.loc[nearest_depot, 'Longitude'],
-                                                routing_df.loc[l, 'Latitude'],
-                                                routing_df.loc[l, 'Longitude']) * cost_per_km) + \
-                                (deg_distance(routing_df.loc[l, 'Latitude'],
-                                                routing_df.loc[l, 'Longitude'],
-                                                routing_df.loc[i, 'orig_Latitude'],
-                                                routing_df.loc[i, 'orig_Longitude']) * float(routing_df.loc[i, 'customer_cost']))
+                        cost_i = (
+                            deg_distance(routing_df.loc[nearest_depot,'Latitude'],
+                                        routing_df.loc[nearest_depot,'Longitude'],
+                                        routing_df.loc[l,'Latitude'],
+                                        routing_df.loc[l,'Longitude']) * cost_per_km
+                            + deg_distance(routing_df.loc[l,'Latitude'],
+                                        routing_df.loc[l,'Longitude'],
+                                        routing_df.loc[i,'orig_Latitude'],
+                                        routing_df.loc[i,'orig_Longitude']) * float(routing_df.loc[i,'customer_cost'])
+                        )
                         cluster_cost += cost_i
                     if cluster_cost < best_total_locker_cost:
                         best_total_locker_cost = cluster_cost
                         best_locker_for_cluster = l
+
                 if best_total_locker_cost < total_direct_cost and best_locker_for_cluster is not None:
                     for i in indices:
-                        routing_df.loc[i, 'Latitude'] = routing_df.loc[best_locker_for_cluster, 'Latitude']
-                        routing_df.loc[i, 'Longitude'] = routing_df.loc[best_locker_for_cluster, 'Longitude']
-                        routing_df.loc[i, 'deliver_type'] = 'locker_pickup'
-                        self.locker_assignments = getattr(self, 'locker_assignments', {})
-                        self.locker_assignments[i] = {'assigned_locker': best_locker_for_cluster,
-                                                    'cluster': label,
-                                                    'locker_cost': best_total_locker_cost / len(indices)}
-                    agg_demand = sum(routing_df.loc[i, 'demand'] for i in indices)
-                    agg_node = {
+                        routing_df.loc[i,'Latitude']     = routing_df.loc[best_locker_for_cluster,'Latitude']
+                        routing_df.loc[i,'Longitude']    = routing_df.loc[best_locker_for_cluster,'Longitude']
+                        routing_df.loc[i,'deliver_type'] = 'locker_pickup'
+                        self.locker_assignments = getattr(self,'locker_assignments',{})
+                        self.locker_assignments[i] = {
+                            'assigned_locker': best_locker_for_cluster,
+                            'cluster': label,
+                            'locker_cost': best_total_locker_cost/len(indices)
+                        }
+                    agg_demand = sum(routing_df.loc[i,'demand'] for i in indices)
+                    aggregated_nodes.append({
                         'new_index': None,
                         'original_index': indices,
                         'node_type': 'locker_cluster',
                         'deliver_type': 'locker_pickup',
-                        'Latitude': routing_df.loc[best_locker_for_cluster, 'Latitude'],
-                        'Longitude': routing_df.loc[best_locker_for_cluster, 'Longitude'],
+                        'Latitude': routing_df.loc[best_locker_for_cluster,'Latitude'],
+                        'Longitude': routing_df.loc[best_locker_for_cluster,'Longitude'],
                         'demand': agg_demand,
                         'served_customers': indices,
-                        # Set the ID to be the actual locker ID.
-                        'ID': routing_df.loc[best_locker_for_cluster, 'ID'] if 'ID' in routing_df.columns 
-                            else f"Locker({best_locker_for_cluster})",
+                        'ID': routing_df.loc[best_locker_for_cluster,'ID'] if 'ID' in routing_df.columns else f"Locker({best_locker_for_cluster})",
                         'assigned_locker': best_locker_for_cluster
-                    }
-                    aggregated_nodes.append(agg_node)
+                    })
                     aggregated_customer_indices.update(indices)
-        # End Phase 1.
-        
-        # --- Post-Processing: Merge Aggregated Nodes That Are Nearly the Same ---
-        tolerance = 0.001  # degrees
-        unique_aggregated = []
+
+        # Merge nearly‑identical aggregated nodes
+        tolerance = 0.001
+        unique_agg = []
         for node in aggregated_nodes:
             merged = False
-            for u_node in unique_aggregated:
-                if (abs(u_node['Latitude'] - node['Latitude']) < tolerance and
-                    abs(u_node['Longitude'] - node['Longitude']) < tolerance):
-                    u_node['served_customers'].extend(node['served_customers'])
-                    u_node['demand'] += node['demand']
-                    # Update the ID to be the actual locker ID if available.
+            for u in unique_agg:
+                if (abs(u['Latitude'] - node['Latitude']) < tolerance and
+                    abs(u['Longitude'] - node['Longitude']) < tolerance):
+                    u['served_customers'].extend(node['served_customers'])
+                    u['demand'] += node['demand']
                     if 'assigned_locker' in node:
-                        u_node['ID'] = routing_df.loc[node['assigned_locker'], 'ID'] if 'ID' in routing_df.columns else f"Locker({node['assigned_locker']})"
-                        u_node['assigned_locker'] = node['assigned_locker']
+                        u['ID'] = routing_df.loc[node['assigned_locker'],'ID']
+                        u['assigned_locker'] = node['assigned_locker']
                     else:
-                        u_node['ID'] = f"LockerCluster({','.join(str(x) for x in u_node['served_customers'])})"
+                        u['ID'] = f"LockerCluster({','.join(str(x) for x in u['served_customers'])})"
                     merged = True
                     break
             if not merged:
-                new_node = node.copy()
-                if not isinstance(new_node.get('served_customers', None), list):
-                    new_node['served_customers'] = [new_node['original_index']]
-                unique_aggregated.append(new_node)
-        aggregated_nodes = unique_aggregated
+                cpy = node.copy()
+                if not isinstance(cpy.get('served_customers'), list):
+                    cpy['served_customers'] = [cpy['original_index']]
+                unique_agg.append(cpy)
+        aggregated_nodes = unique_agg
 
         # ------------------
-        # Build new routing nodes:
+        # Build new routing_df
         new_nodes = []
-        # 1. Add depot nodes.
-        depot_mask = routing_df['node_type'].str.lower() == 'depot'
-        for idx, row in routing_df[depot_mask].iterrows():
+        # 1) depots
+        for idx, row in routing_df[routing_df['node_type'].str.lower()=='depot'].iterrows():
             new_nodes.append({
                 'node_type': row['node_type'],
                 'deliver_type': row['deliver_type'],
                 'Latitude': row['Latitude'],
                 'Longitude': row['Longitude'],
                 'demand': 0.0,
-                'orig_Latitude': row.get('orig_Latitude', row['Latitude']),
-                'orig_Longitude': row.get('orig_Longitude', row['Longitude']),
-                'ID': row.get('ID', idx)
+                'orig_Latitude': row.get('orig_Latitude',row['Latitude']),
+                'orig_Longitude':row.get('orig_Longitude',row['Longitude']),
+                'ID': row.get('ID',idx)
             })
-        # 2. Add individual customer nodes not aggregated.
+        # 2) non‑agg customers
         non_agg_mask = cust_mask & (~routing_df.index.isin(aggregated_customer_indices))
         for idx, row in routing_df[non_agg_mask].iterrows():
             new_nodes.append({
@@ -439,11 +397,11 @@ class AdvancedVRPSolver:
                 'Latitude': row['Latitude'],
                 'Longitude': row['Longitude'],
                 'demand': row['demand'],
-                'orig_Latitude': row.get('orig_Latitude', row['Latitude']),
-                'orig_Longitude': row.get('orig_Longitude', row['Longitude']),
-                'ID': row.get('ID', idx)
+                'orig_Latitude': row.get('orig_Latitude',row['Latitude']),
+                'orig_Longitude':row.get('orig_Longitude',row['Longitude']),
+                'ID': row.get('ID',idx)
             })
-        # 3. Add aggregated locker nodes.
+        # 3) aggregated clusters
         for node in aggregated_nodes:
             new_nodes.append({
                 'node_type': node['node_type'],
@@ -451,218 +409,222 @@ class AdvancedVRPSolver:
                 'Latitude': node['Latitude'],
                 'Longitude': node['Longitude'],
                 'demand': node['demand'],
-                'served_customers': node.get('served_customers', []),
+                'served_customers': node['served_customers'],
                 'ID': node['ID']
             })
+
         new_routing_df = pd.DataFrame(new_nodes).reset_index(drop=True)
         new_routing_df.index.name = 'new_index'
         new_routing_df.reset_index(inplace=True)
         routing_df = new_routing_df.copy()
-        # (Original data remains unchanged for markers.)
 
         # ------------------
-        # Phase 2: Build new distance matrix for routing_df.
-        num_nodes = len(routing_df)
-        new_dist_mat = [[0.0] * num_nodes for _ in range(num_nodes)]
-        for a in range(num_nodes):
-            for b in range(num_nodes):
-                if a == b:
-                    continue
-                latA, lonA = routing_df.loc[a, 'Latitude'], routing_df.loc[a, 'Longitude']
-                latB, lonB = routing_df.loc[b, 'Latitude'], routing_df.loc[b, 'Longitude']
-                new_dist_mat[a][b] = deg_distance(latA, lonA, latB, lonB)
-        # Get all depot indices from routing_df.
-        depot_rows = routing_df[routing_df['node_type'].str.lower() == 'depot']
-        if depot_rows.empty:
-            raise ValueError("No depot found in routing data.")
-        depot_indices_final = depot_rows.index.tolist()
+        # Phase 2: Distance matrix & depot list
+        def build_dist_mat(df):
+            n = len(df)
+            mat = [[0.0]*n for _ in range(n)]
+            for i in range(n):
+                for j in range(n):
+                    if i==j: continue
+                    mat[i][j] = deg_distance(df.loc[i,'Latitude'], df.loc[i,'Longitude'],
+                                            df.loc[j,'Latitude'], df.loc[j,'Longitude'])
+            return mat
+
+        new_dist_mat = build_dist_mat(routing_df)
+        depot_indices_final = routing_df[routing_df['node_type'].str.lower()=='depot'].index.tolist()
 
         # ------------------
-        # Phase 3: Initial solution using Clarke–Wright Savings.
-        # For each non-depot node, determine its nearest depot from routing_df.
-        initial_routes = {}
-        for idx in routing_df.index:
-            if routing_df.loc[idx, 'node_type'].strip().lower() != 'depot':
-                nearest_depot = min(depot_indices_final, key=lambda d: new_dist_mat[d][idx])
-                initial_routes[idx] = [nearest_depot, idx, nearest_depot]
-        # Merge routes only if they share the same starting depot.
-        savings = []
-        for i in initial_routes:
-            for j in initial_routes:
-                if i >= j:
-                    continue
-                if initial_routes[i][0] == initial_routes[j][0]:
-                    s = new_dist_mat[initial_routes[i][0]][i] + new_dist_mat[initial_routes[i][0]][j] - new_dist_mat[i][j]
-                    savings.append((s, i, j))
-        savings.sort(reverse=True, key=lambda x: x[0])
-        route_of = {i: i for i in initial_routes}
-        for s, i, j in savings:
-            ri, rj = route_of[i], route_of[j]
-            if ri != rj and initial_routes[ri][0] == initial_routes[rj][0]:
-                merged = initial_routes[ri][:-1] + initial_routes[rj][1:]
-                initial_routes[ri] = merged
-                for node in initial_routes[rj][1:-1]:
-                    route_of[node] = ri
-                del initial_routes[rj]
-        final_routes = list(initial_routes.values())
-        # Ensure each route returns to its starting depot.
-        for r in final_routes:
-            depot_start = r[0]
-            if r[-1] != depot_start:
-                r.append(depot_start)
+        # Phase 3: Clarke–Wright Savings
+        def run_clarke_wright(dist_mat, df, depots):
+            init_routes = {}
+            for idx in df.index:
+                if df.loc[idx,'node_type'].strip().lower()!='depot':
+                    d0 = min(depots, key=lambda d: dist_mat[d][idx])
+                    init_routes[idx] = [d0, idx, d0]
+            savings = []
+            for i in init_routes:
+                for j in init_routes:
+                    if i>=j: continue
+                    if init_routes[i][0]==init_routes[j][0]:
+                        s = dist_mat[init_routes[i][0]][i] + dist_mat[init_routes[i][0]][j] - dist_mat[i][j]
+                        savings.append((s,i,j))
+            savings.sort(reverse=True, key=lambda x: x[0])
+            route_of = {i:i for i in init_routes}
+            for s,i,j in savings:
+                ri, rj = route_of[i], route_of[j]
+                if ri!=rj and init_routes[ri][0]==init_routes[rj][0]:
+                    merged = init_routes[ri][:-1] + init_routes[rj][1:]
+                    init_routes[ri] = merged
+                    for node in init_routes[rj][1:-1]:
+                        route_of[node] = ri
+                    del init_routes[rj]
+            final = list(init_routes.values())
+            for r in final:
+                if r[-1]!=r[0]:
+                    r.append(r[0])
+            return final
 
+        final_routes = run_clarke_wright(new_dist_mat, routing_df, depot_indices_final)
+
+        
         # ------------------
-        # Phase 4: Simulated Annealing (SA) for local improvement.
-        def compute_solution_cost(routes_list, dist_mat, df):
+        # Phase 4: Simulated Annealing with 2‑opt & mode‑toggle
+        def compute_solution_cost(routes, dist_mat, df):
             total = 0.0
-            for r in routes_list:
-                for k in range(len(r)-1):
-                    total += dist_mat[r[k]][r[k+1]] * cost_per_km
+            for r in routes:
+                for a,b in zip(r,r[1:]):
+                    total += dist_mat[a][b] * cost_per_km
                 for n in r:
-                    # For individual customer nodes served via locker.
-                    if df.loc[n, 'node_type'].strip().lower() == 'customer' and \
-                    df.loc[n, 'deliver_type'].strip().lower() == 'locker_pickup':
-                        lat_orig = df.loc[n, 'orig_Latitude']
-                        lon_orig = df.loc[n, 'orig_Longitude']
-                        lat_curr = df.loc[n, 'Latitude']
-                        lon_curr = df.loc[n, 'Longitude']
-                        total += deg_distance(lat_orig, lon_orig, lat_curr, lon_curr) * float(df.loc[n, 'customer_cost'])
-                    # For aggregated locker nodes, sum penalty over served customers.
-                    elif df.loc[n, 'node_type'].strip().lower() == 'locker_cluster':
-                        served = df.loc[n, 'served_customers']
-                        # For each served customer, look up original coordinates in original_df.
-                        for cust_idx in served:
-                            cust_row = original_df.loc[cust_idx]
-                            total += deg_distance(cust_row['Latitude'], cust_row['Longitude'],
-                                                    df.loc[n, 'Latitude'], df.loc[n, 'Longitude']) * float(cust_row['customer_cost'])
+                    row = df.loc[n]
+                    nt = row['node_type'].strip().lower()
+                    dt = row['deliver_type'].strip().lower()
+                    if nt=='customer' and dt=='locker_pickup':
+                        total += deg_distance(
+                            row['orig_Latitude'], row['orig_Longitude'],
+                            row['Latitude'],      row['Longitude']
+                        ) * float(row['customer_cost'])
+                    elif nt=='locker_cluster':
+                        for ci in row['served_customers']:
+                            cro = original_df.loc[ci]
+                            total += deg_distance(
+                                cro['Latitude'], cro['Longitude'],
+                                row['Latitude'],  row['Longitude']
+                            ) * float(cro['customer_cost'])
             return total
 
         current_routes = copy.deepcopy(final_routes)
-        current_cost = compute_solution_cost(current_routes, new_dist_mat, routing_df)
-        best_routes = copy.deepcopy(current_routes)
-        best_cost = current_cost
+        current_cost   = compute_solution_cost(current_routes, new_dist_mat, routing_df)
+        best_routes    = copy.deepcopy(current_routes)
+        best_cost      = current_cost
 
+        # original mode‑toggle
         def random_move(df):
             new_df = df.copy()
-            cust_idx = new_df[new_df['node_type'].str.lower() == 'customer'].index.tolist()
+            cust_idx = new_df[new_df['node_type'].str.lower()=='customer'].index.tolist()
             if not cust_idx:
                 return new_df
             i = random.choice(cust_idx)
-            current_mode = new_df.loc[i, 'deliver_type'].strip().lower()
-            nearest_depot = min(depot_indices_final, key=lambda d: deg_distance(
-                new_df.loc[d, 'Latitude'], new_df.loc[d, 'Longitude'],
-                new_df.loc[i, 'Latitude'], new_df.loc[i, 'Longitude']
-            ))
-            if current_mode == 'locker_pickup':
-                new_df.loc[i, 'Latitude'] = new_df.loc[i, 'orig_Latitude']
-                new_df.loc[i, 'Longitude'] = new_df.loc[i, 'orig_Longitude']
-                new_df.loc[i, 'deliver_type'] = 'last_mile'
-            else:
-                best_locker = None
-                best_cost_local = float('inf')
-                locker_idx = new_df[new_df['node_type'].str.lower() == 'locker'].index.tolist()
-                for l in locker_idx:
-                    candidate_cost = (deg_distance(new_df.loc[nearest_depot, 'Latitude'],
-                                                new_df.loc[nearest_depot, 'Longitude'],
-                                                new_df.loc[l, 'Latitude'],
-                                                new_df.loc[l, 'Longitude']) * cost_per_km) + \
-                                    (deg_distance(new_df.loc[l, 'Latitude'],
-                                                new_df.loc[l, 'Longitude'],
-                                                new_df.loc[i, 'Latitude'],
-                                                new_df.loc[i, 'Longitude']) * float(new_df.loc[i, 'customer_cost']))
-                    if candidate_cost < best_cost_local:
-                        best_cost_local = candidate_cost
-                        best_locker = l
-                if best_locker is not None:
-                    new_df.loc[i, 'Latitude'] = new_df.loc[best_locker, 'Latitude']
-                    new_df.loc[i, 'Longitude'] = new_df.loc[best_locker, 'Longitude']
-                    new_df.loc[i, 'deliver_type'] = 'locker_pickup'
+            mode = new_df.loc[i,'deliver_type'].strip().lower()
+            if mode=='locker_pickup':
+                new_df.loc[i,['Latitude','Longitude']] = [
+                    new_df.loc[i,'orig_Latitude'], new_df.loc[i,'orig_Longitude']
+                ]
+                new_df.loc[i,'deliver_type'] = 'last_mile'
+            elif mode=='last_mile':
+                best_l, best_c = None, float('inf')
+                lockers = new_df[new_df['node_type'].str.lower()=='locker'].index
+                for l in lockers:
+                    d0 = min(depot_indices_final, key=lambda d: deg_distance(
+                        new_df.loc[d,'Latitude'], new_df.loc[d,'Longitude'],
+                        new_df.loc[i,'Latitude'], new_df.loc[i,'Longitude']
+                    ))
+                    c1 = deg_distance(new_df.loc[d0,'Latitude'], new_df.loc[d0,'Longitude'],
+                                    new_df.loc[l,'Latitude'], new_df.loc[l,'Longitude']) * cost_per_km
+                    c2 = deg_distance(new_df.loc[l,'Latitude'], new_df.loc[l,'Longitude'],
+                                    new_df.loc[i,'orig_Latitude'], new_df.loc[i,'orig_Longitude']) * float(new_df.loc[i,'customer_cost'])
+                    if c1+c2 < best_c:
+                        best_c, best_l = c1+c2, l
+                if best_l is not None:
+                    new_df.loc[i,['Latitude','Longitude']] = [
+                        new_df.loc[best_l,'Latitude'], new_df.loc[best_l,'Longitude']
+                    ]
+                    new_df.loc[i,'deliver_type'] = 'locker_pickup'
             return new_df
 
         iter_count = 0
         while T > T_min and iter_count < max_iter:
-            candidate_df = random_move(routing_df)
-            num_nodes_candidate = len(candidate_df)
-            cand_dist_mat = [[0.0] * num_nodes_candidate for _ in range(num_nodes_candidate)]
-            for a in range(num_nodes_candidate):
-                for b in range(num_nodes_candidate):
-                    if a == b:
-                        continue
-                    latA = candidate_df.loc[a, 'Latitude']
-                    lonA = candidate_df.loc[a, 'Longitude']
-                    latB = candidate_df.loc[b, 'Latitude']
-                    lonB = candidate_df.loc[b, 'Longitude']
-                    cand_dist_mat[a][b] = deg_distance(latA, lonA, latB, lonB)
-            candidate_cost = compute_solution_cost(current_routes, cand_dist_mat, candidate_df)
-            delta = candidate_cost - current_cost
-            if delta < 0 or random.random() < math.exp(-delta / T):
-                routing_df = candidate_df
-                new_dist_mat = cand_dist_mat
-                current_cost = candidate_cost
-                if candidate_cost < best_cost:
-                    best_cost = candidate_cost
-                    best_routes = copy.deepcopy(current_routes)
+            
+            if random.random() < 0.5:
+                # mode‑toggle + re‑Clarke–Wright
+                cand_df      = random_move(routing_df)
+                cand_dist_mat= build_dist_mat(cand_df)
+                cand_routes  = run_clarke_wright(cand_dist_mat, cand_df, depot_indices_final)
+            
+            else:
+                # 2‑opt on one route
+                cand_df      = routing_df
+                cand_dist_mat= new_dist_mat
+                cand_routes  = copy.deepcopy(current_routes)
+                ridx         = random.randrange(len(cand_routes))
+                cand_routes[ridx] = two_opt(cand_routes[ridx], cand_dist_mat)
+            
+            # 2‑opt on one route
+            cand_df      = routing_df
+            cand_dist_mat= new_dist_mat
+            cand_routes  = copy.deepcopy(current_routes)
+            ridx         = random.randrange(len(cand_routes))
+            cand_routes[ridx] = two_opt(cand_routes[ridx], cand_dist_mat)
+
+
+            cand_cost = compute_solution_cost(cand_routes, cand_dist_mat, cand_df)
+            delta     = cand_cost - current_cost
+            if delta < 0 or random.random() < math.exp(-delta/T):
+                routing_df     = cand_df
+                new_dist_mat   = cand_dist_mat
+                current_routes = cand_routes
+                current_cost   = cand_cost
+                if current_cost < best_cost:
+                    best_cost   = current_cost
+                    best_routes = copy.deepcopy(cand_routes)
             T *= alpha
             iter_count += 1
 
         final_routes = best_routes
+        
 
         # ------------------
-        # Phase 5: Greedy Assignment of Routes to Vehicles.
+        # Phase 5: Greedy Vehicle Assignment.
         vehicles_sorted = vehicles_df.sort_values(by='capacity', ascending=False)
         route_assignments = {}
         fr_idx = 0
-        for idx, veh in vehicles_sorted.iterrows():
-            if fr_idx < len(final_routes):
-                r = final_routes[fr_idx]
-                display_route = []
-                for n in r:
-                    row = routing_df.loc[n]
-                    if row['node_type'].strip().lower() == 'customer' and row['deliver_type'].strip().lower() == 'locker_pickup':
-                        display_route.append(f"Locker({row.get('ID', n)})")
-                    else:
-                        display_route.append(row.get('ID', n))
-                route_distance = sum(new_dist_mat[r[k]][r[k+1]] for k in range(len(r)-1))
-                route_demand = sum(routing_df.loc[n, 'demand'] for n in r if routing_df.loc[n, 'node_type'].strip().lower() == 'customer')
-                route_cost = route_distance * cost_per_km
-                route_penalty = 0.0
-                for n in r:
-                    if routing_df.loc[n, 'node_type'].strip().lower() == 'customer' and \
-                    routing_df.loc[n, 'deliver_type'].strip().lower() == 'locker_pickup':
-                        lat_orig = routing_df.loc[n, 'orig_Latitude']
-                        lon_orig = routing_df.loc[n, 'orig_Longitude']
-                        lat_curr = routing_df.loc[n, 'Latitude']
-                        lon_curr = routing_df.loc[n, 'Longitude']
-                        route_penalty += deg_distance(lat_orig, lon_orig, lat_curr, lon_curr) * float(routing_df.loc[n, 'customer_cost'])
-                    elif routing_df.loc[n, 'node_type'].strip().lower() == 'locker_cluster':
-                        # For an aggregated node, compute penalty for each served customer using original_df.
-                        served = routing_df.loc[n, 'served_customers']
-                        for cust_idx in served:
-                            cust_row = original_df.loc[cust_idx]
-                            route_penalty += deg_distance(cust_row['Latitude'], cust_row['Longitude'],
-                                                        routing_df.loc[n, 'Latitude'], routing_df.loc[n, 'Longitude']) * float(cust_row['customer_cost'])
-                route_cost += route_penalty
-                route_assignments[veh['vehicle_id']] = {
-                    'route': r,
-                    'display_route': display_route,
-                    'distance': route_distance,
-                    'penalty': route_penalty,
-                    'cost': route_cost,
-                    'demand': route_demand,
-                    'vehicle': veh.to_dict()
-                }
-                fr_idx += 1
+        for _, veh in vehicles_sorted.iterrows():
+            if fr_idx >= len(final_routes):
+                break
+            r = final_routes[fr_idx]
+            display = []
+            for n in r:
+                row = routing_df.loc[n]
+                nt, dt = row['node_type'].lower(), row['deliver_type'].lower()
+                if nt=='customer' and dt=='locker_pickup':
+                    display.append(f"Locker({row['ID']})")
+                else:
+                    display.append(row['ID'])
+            dist = sum(new_dist_mat[a][b] for a,b in zip(r,r[1:]))
+            demand = sum(routing_df.loc[n,'demand']
+                        for n in r if routing_df.loc[n,'node_type'].lower()=='customer')
+            cost = dist * cost_per_km
+            penalty = 0.0
+            for n in r:
+                row = routing_df.loc[n]
+                nt, dt = row['node_type'].lower(), row['deliver_type'].lower()
+                if nt=='customer' and dt=='locker_pickup':
+                    penalty += deg_distance(row['orig_Latitude'], row['orig_Longitude'],
+                                            row['Latitude'], row['Longitude']) * float(row['customer_cost'])
+                elif nt=='locker_cluster':
+                    for ci in row['served_customers']:
+                        cro = original_df.loc[ci]
+                        penalty += deg_distance(cro['Latitude'], cro['Longitude'],
+                                                row['Latitude'], row['Longitude']) * float(cro['customer_cost'])
+            total = cost + penalty
+            route_assignments[veh['vehicle_id']] = {
+                'route': r,
+                'display_route': display,
+                'distance': dist,
+                'penalty': penalty,
+                'cost': total,
+                'demand': demand,
+                'vehicle': veh.to_dict()
+            }
+            fr_idx += 1
 
-        total_cost = 0.0
-        for vid, rdata in route_assignments.items():
-            fixed = rdata['vehicle'].get('fixed_cost', 0.0)
-            total_cost += fixed + rdata['cost']
+        # FIX: pull fixed_cost from nested dict
+        total_cost = sum(
+            rdata['vehicle'].get('fixed_cost', 0.0) + rdata['cost']
+            for rdata in route_assignments.values()
+        )
 
         self.data_routing = routing_df.copy()
         return route_assignments, total_cost
-
-
-
 
 
 
