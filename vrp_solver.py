@@ -574,7 +574,7 @@ class AdvancedVRPSolver:
 
         # ------------------
         # Phase 5: Greedy Vehicle Assignment.
-        vehicles_sorted = vehicles_df.sort_values(by='capacity', ascending=False)
+        vehicles_sorted = vehicles_df.sort_values(by='cost_per_km', ascending=True)
         route_assignments = {}
         fr_idx = 0
         for _, veh in vehicles_sorted.iterrows():
@@ -592,7 +592,7 @@ class AdvancedVRPSolver:
             dist = sum(new_dist_mat[a][b] for a,b in zip(r,r[1:]))
             demand = sum(routing_df.loc[n,'demand']
                         for n in r if routing_df.loc[n,'node_type'].lower()=='customer')
-            cost = dist * cost_per_km
+            cost = dist * veh['cost_per_km']
             penalty = 0.0
             for n in r:
                 row = routing_df.loc[n]
