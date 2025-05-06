@@ -272,24 +272,24 @@ class AdvancedVRPSolver:
         cache[key] = km
         return km
 
-    def solve_vrp_heuristic(self, vehicles_df, forbidden_groups=None):
+    def solve_vrp_heuristic(self, vehicles_df, forbidden_groups=None, locker_km_limit=100):
         import math, numpy as np, pandas as pd, random, copy
 
         if forbidden_groups is None:
             forbidden_groups = []
 
-        # ─────────────── Fleet inference ───────────────
+        # ─ Fleet inference ─
         fleet = vehicles_df.to_dict('records')
         fleet.sort(key=lambda v: v['cost_per_km'])
         available_vehicles = fleet.copy()
         max_vehicle_capacity = max(v['capacity'] for v in available_vehicles)
 
-        # ─────────────── Parameters ───────────────
-        cost_per_km   = getattr(self, 'cost_per_km', vehicles_df['cost_per_km'].iloc[0])
+        # ─ Parameters ─
+        cost_per_km = getattr(self, 'cost_per_km', vehicles_df['cost_per_km'].iloc[0])
         T, T_min, α, max_iter = 500.0, 1e-10, 0.99, 10000
         km_per_degree = 111.0
 
-        # ─────────────── Phase 0: Data Prep ───────────────
+        # ─ Phase 0: Data Prep ─
         original_df = self.data.copy()
         routing_df  = self.data.copy()
         cust_mask   = routing_df['node_type'].str.lower() == 'customer'
@@ -301,15 +301,14 @@ class AdvancedVRPSolver:
             return math.hypot((lat1 - lat2) * km_per_degree,
                             (lon1 - lon2) * km_per_degree)
 
-        # ─────────────── Phase 1: Per-customer locker assignment with knapsack ───────────────
-        lm_mask        = cust_mask & (routing_df['deliver_type'].str.lower() == 'last_mile')
+        # ─ Phase 1: Per-customer locker assignment with knapsack ─
+        lm_mask        = cust_mask
         lm_indices     = routing_df[lm_mask].index.tolist()
         locker_indices = routing_df[routing_df['node_type'].str.lower() == 'locker'].index.tolist()
 
-        # compute best single locker & saving per customer
         best_choice = {}
         for i in lm_indices:
-            # direct cost from nearest depot
+            # find nearest depot & direct cost
             d0 = min(self.depot_indices,
                     key=lambda d: deg_distance(
                         routing_df.at[d,'Latitude'], routing_df.at[d,'Longitude'],
@@ -321,15 +320,21 @@ class AdvancedVRPSolver:
 
             best_sav, best_l = 0.0, None
             for l in locker_indices:
+                # **NEW: skip lockers too far from this customer**
+                dist_cl = deg_distance(
+                    routing_df.at[l,'Latitude'], routing_df.at[l,'Longitude'],
+                    routing_df.at[i,'orig_Latitude'], routing_df.at[i,'orig_Longitude']
+                )
+                if dist_cl > locker_km_limit:
+                    continue
+
+                # compute saving via locker l
                 via_cost = (
                     deg_distance(
                         routing_df.at[d0,'Latitude'], routing_df.at[d0,'Longitude'],
                         routing_df.at[l,'Latitude'], routing_df.at[l,'Longitude']
                     ) * cost_per_km
-                    + deg_distance(
-                        routing_df.at[l,'Latitude'], routing_df.at[l,'Longitude'],
-                        routing_df.at[i,'orig_Latitude'], routing_df.at[i,'orig_Longitude']
-                    ) * float(routing_df.at[i,'customer_cost'])
+                    + dist_cl * float(routing_df.at[i,'cost'])
                 )
                 sav = direct_cost - via_cost
                 if sav > best_sav:
@@ -403,7 +408,7 @@ class AdvancedVRPSolver:
                 'orig_Latitude':  row.get('orig_Latitude', row['Latitude']),
                 'orig_Longitude': row.get('orig_Longitude', row['Longitude']),
                 'ID':             row.get('ID'),
-                'customer_cost':  0.0
+                'cost':  0.0
             })
         # remaining customers
         non_agg = cust_mask & (~routing_df.index.isin(agg_customers))
@@ -417,11 +422,11 @@ class AdvancedVRPSolver:
                 'orig_Latitude':  row.get('orig_Latitude', row['Latitude']),
                 'orig_Longitude': row.get('orig_Longitude', row['Longitude']),
                 'ID':             row.get('ID'),
-                'customer_cost':  float(row['customer_cost'])
+                'cost':  float(row['cost'])
             })
         # locker clusters
         for node in aggregated_nodes:
-            node['customer_cost'] = 0.0
+            node['cost'] = 0.0
             new_nodes.append(node.copy())
 
         routing_df = pd.DataFrame(new_nodes).reset_index(drop=True)
@@ -520,14 +525,14 @@ class AdvancedVRPSolver:
                         tot += deg_distance(
                             row['orig_Latitude'], row['orig_Longitude'],
                             row['Latitude'], row['Longitude']
-                        ) * float(row['customer_cost'])
+                        ) * float(row['cost'])
                     elif nt=='locker_cluster':
                         for ci in row['served_customers']:
                             cro = original_df.loc[ci]
                             tot += deg_distance(
                                 cro['Latitude'], cro['Longitude'],
                                 row['Latitude'], row['Longitude']
-                            ) * float(cro['customer_cost'])
+                            ) * float(cro['cost'])
             return tot
 
         def move_op(routes):
@@ -642,14 +647,14 @@ class AdvancedVRPSolver:
                     penalty += deg_distance(
                         row['orig_Latitude'], row['orig_Longitude'],
                         row['Latitude'], row['Longitude']
-                    ) * float(row['customer_cost'])
+                    ) * float(row['cost'])
                 elif nt=='locker_cluster':
                     for ci in row['served_customers']:
                         cro = original_df.loc[ci]
                         penalty += deg_distance(
                             cro['Latitude'], cro['Longitude'],
                             row['Latitude'], row['Longitude']
-                        ) * float(cro['customer_cost'])
+                        ) * float(cro['cost'])
                     print(f"Locker {row['ID']} carrying {row['load']} / {row['capacity']}")
                 display.append(
                     f"Locker({row['ID']})" 
@@ -776,7 +781,7 @@ class AdvancedVRPSolver:
                         [cust_coord, locker_coord],
                         color='black',
                         weight=2,
-                        opacity=0.7,
+                        opacity=0.1,
                         dash_array='5, 5',
                         tooltip=f"Last Mile: Müşteri {row.get('ID', '')} -> Locker {row.get('assigned_locker', '')}"
                     ).add_to(m)
@@ -817,7 +822,7 @@ class AdvancedVRPSolver:
                 poly = folium.PolyLine(
                     full_route_coords,
                     color=colors[idx % len(colors)],
-                    weight=4,
+                    weight=1,
                     opacity=0.7,
                     popup=f"Araç {vid} Rotası (Maliyet: {rdata.get('cost', 0):.2f})",
                     tooltip=f"Araç ID: {vid}"
