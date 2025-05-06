@@ -147,7 +147,7 @@ if uploaded_nodes_file is not None and uploaded_vehicles_file is not None:
     st.session_state.original_data = original_data.copy()
 
     # Gerekli kolonları kontrol et
-    needed_node_cols = ['Latitude', 'Longitude', 'demand', 'node_type', 'deliver_type']
+    needed_node_cols = ['Latitude', 'Longitude', 'demand', 'node_type']
     needed_vehicle_cols = ['vehicle_id', 'capacity', 'max_duration', 'cost_per_km', 'fixed_cost']
 
     if not all(col in original_data.columns for col in needed_node_cols):

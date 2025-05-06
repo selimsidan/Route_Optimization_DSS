@@ -292,6 +292,7 @@ class AdvancedVRPSolver:
         # ─ Phase 0: Data Prep ─
         original_df = self.data.copy()
         routing_df  = self.data.copy()
+        routing_df['deliver_type'] = 'last_mile'
         cust_mask   = routing_df['node_type'].str.lower() == 'customer'
         if 'orig_Latitude' not in routing_df.columns:
             routing_df.loc[cust_mask, 'orig_Latitude']  = routing_df.loc[cust_mask, 'Latitude']
@@ -740,6 +741,7 @@ class AdvancedVRPSolver:
         import folium
         import pandas as pd
         from folium.plugins import PolyLineTextPath  # added for arrows
+        original_data['deliver_type'] = 'last_mile'
 
         # Center the map using the original data (so all nodes are visible).
         center_lat = original_data['Latitude'].mean()
